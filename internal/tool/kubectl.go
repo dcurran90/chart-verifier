@@ -117,25 +117,18 @@ func (k Kubectl) WaitForWorkloadResources(context context.Context, namespace str
 		// Inspect the resources that are successfully returned or handle API request errors
 		if errDeployments == nil && errDaemonSets == nil && errStatefulSets == nil {
 			getWorkloadResourceError = ""
-			// Check the number of unavailable replicas for each workload type
-			for _, deployment := range deployments {
-				if deployment.Status.UnavailableReplicas > 0 {
-					unavailableWorkloadResources = append(unavailableWorkloadResources, workloadNotReady{Name: deployment.Name, ResourceType: "Deployment", Unavailable: deployment.Status.UnavailableReplicas})
-				}
-			}
-			for _, daemonSet := range daemonSets {
-				if daemonSet.Status.NumberUnavailable > 0 {
-					unavailableWorkloadResources = append(unavailableWorkloadResources, workloadNotReady{Name: daemonSet.Name, ResourceType: "DaemonSet", Unavailable: daemonSet.Status.NumberUnavailable})
-				}
-			}
-			for _, statefulSet := range statefulSets {
-				// StatefulSet doesn't report unavailable replicas so it is calculated here
-				unavailableReplicas := statefulSet.Status.Replicas - statefulSet.Status.AvailableReplicas
-				if unavailableReplicas > 0 {
-					unavailableWorkloadResources = append(unavailableWorkloadResources, workloadNotReady{Name: statefulSet.Name, ResourceType: "StatefulSet", Unavailable: unavailableReplicas})
-				}
-			}
 
+			// Check the number of unavailable replicas for each workload type
+			unavailableResourcesChan := make(chan []workloadNotReady)
+			go parseDeployments(deployments, unavailableResourcesChan)
+			go parseDaemonSets(daemonSets, unavailableResourcesChan)
+			go parseStatefulSets(statefulSets, unavailableResourcesChan)
+
+			unavailableWorkloadResources = append(unavailableWorkloadResources, <-unavailableResourcesChan...)
+			unavailableWorkloadResources = append(unavailableWorkloadResources, <-unavailableResourcesChan...)
+			unavailableWorkloadResources = append(unavailableWorkloadResources, <-unavailableResourcesChan...)
+
+			close(unavailableResourcesChan)
 			// If any pods are unavailable report it and sleep until the next loop
 			// Else everything is available and the loop will exit
 			if len(unavailableWorkloadResources) > 0 {
@@ -231,6 +224,41 @@ func getDaemonSetsList(k Kubectl, context context.Context, namespace string, sel
 		return nil, err
 	}
 	return list.Items, err
+}
+
+func parseDeployments(deployments []v1.Deployment, unavailableWorkloadResources chan []workloadNotReady) {
+	unavailableDeploymentResources := []workloadNotReady{}
+
+	for _, deployment := range deployments {
+		if deployment.Status.UnavailableReplicas > 0 {
+			unavailableDeploymentResources = append(unavailableDeploymentResources, workloadNotReady{Name: deployment.Name, ResourceType: "Deployment", Unavailable: deployment.Status.UnavailableReplicas})
+		}
+	}
+	unavailableWorkloadResources <- unavailableDeploymentResources
+}
+
+func parseDaemonSets(daemonsets []v1.DaemonSet, unavailableWorkloadResources chan []workloadNotReady) {
+	unavailableDaemonSetResources := []workloadNotReady{}
+
+	for _, daemonset := range daemonsets {
+		if daemonset.Status.NumberUnavailable > 0 {
+			unavailableDaemonSetResources = append(unavailableDaemonSetResources, workloadNotReady{Name: daemonset.Name, ResourceType: "DaemonSet", Unavailable: daemonset.Status.NumberUnavailable})
+		}
+	}
+	unavailableWorkloadResources <- unavailableDaemonSetResources
+}
+
+func parseStatefulSets(statefulsets []v1.StatefulSet, unavailableWorkloadResources chan []workloadNotReady) {
+	unavailableStatefulSetResources := []workloadNotReady{}
+
+	for _, statefulSet := range statefulsets {
+		// StatefulSet doesn't report unavailable replicas so it is calculated here
+		unavailableReplicas := statefulSet.Status.Replicas - statefulSet.Status.AvailableReplicas
+		if unavailableReplicas > 0 {
+			unavailableStatefulSetResources = append(unavailableStatefulSetResources, workloadNotReady{Name: statefulSet.Name, ResourceType: "StatefulSet", Unavailable: unavailableReplicas})
+		}
+	}
+	unavailableWorkloadResources <- unavailableStatefulSetResources
 }
 
 func GetLatestKubeVersion() string {
